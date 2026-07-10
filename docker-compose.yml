@@ -28,7 +28,9 @@ services:
       - ./backend/.env.backend
 
     depends_on:
-      - mysql
+      mysql:
+        condition: service_healthy
+
 
     restart: unless-stopped
 
