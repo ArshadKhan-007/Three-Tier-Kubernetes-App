@@ -1,0 +1,9 @@
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: backend-config
+  namespace: task-manager
+data:
+  DB_HOST: mysql-service
+  DB_PORT: "3306"
+  DB_USER: "root"
