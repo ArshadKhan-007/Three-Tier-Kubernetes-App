@@ -15,6 +15,9 @@ spec:
     spec:
       containers:
         - name: frontend
+          env:
+            - name: BACKEND_HOST
+              value: backend-service
           image: arshadkhan007/3-tier-application:frontend-v1
           imagePullPolicy: Always
           ports:

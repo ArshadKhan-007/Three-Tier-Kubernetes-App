@@ -6,6 +6,9 @@ services:
 
     container_name: task-manager-frontend
 
+    environment:
+      - BACKEND_HOST=backend
+
     ports:
       - "3000:80"
 
