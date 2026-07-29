@@ -8,6 +8,7 @@ services:
 
     environment:
       - BACKEND_HOST=backend
+      - BACKEND_PORT=8000
 
     ports:
       - "3000:80"
