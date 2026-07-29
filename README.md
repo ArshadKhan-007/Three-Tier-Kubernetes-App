@@ -1,19 +1,10 @@
-<div align="center">
-
 # 🧱 Three-Tier Task Manager on Kubernetes
 
 **React → FastAPI → MySQL, fully containerized and deployed on Kubernetes (kind).**
 
-![React](https://img.shields.io/badge/Frontend-React_19_+_Vite-149eca?logo=react&logoColor=white)
-![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi&logoColor=white)
-![MySQL](https://img.shields.io/badge/Database-MySQL_8-4479A1?logo=mysql&logoColor=white)
-![Docker](https://img.shields.io/badge/Containerized-Docker-2496ED?logo=docker&logoColor=white)
-![Kubernetes](https://img.shields.io/badge/Orchestration-Kubernetes-326CE5?logo=kubernetes&logoColor=white)
-![Nginx](https://img.shields.io/badge/Web_Server-Nginx-009639?logo=nginx&logoColor=white)
+![React](https://img.shields.io/badge/Frontend-React_19_+_Vite-149eca?logo=react&logoColor=white) [![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi&logoColor=white)](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi&logoColor=white) [![MySQL](https://img.shields.io/badge/Database-MySQL_8-4479A1?logo=mysql&logoColor=white)](https://img.shields.io/badge/Database-MySQL_8-4479A1?logo=mysql&logoColor=white) [![Docker](https://img.shields.io/badge/Containerized-Docker-2496ED?logo=docker&logoColor=white)](https://img.shields.io/badge/Containerized-Docker-2496ED?logo=docker&logoColor=white) [![Kubernetes](https://img.shields.io/badge/Orchestration-Kubernetes-326CE5?logo=kubernetes&logoColor=white)](https://img.shields.io/badge/Orchestration-Kubernetes-326CE5?logo=kubernetes&logoColor=white) [![Nginx](https://img.shields.io/badge/Web_Server-Nginx-009639?logo=nginx&logoColor=white)](https://img.shields.io/badge/Web_Server-Nginx-009639?logo=nginx&logoColor=white)
 
 A small Task Manager app used as a hands-on reference for **containerizing a multi-tier app and deploying it to Kubernetes** — Deployments, Services, ConfigMaps, Secrets, and PV/PVC, all wired together.
-
-</div>
 
 ---
 
@@ -26,8 +17,8 @@ A small Task Manager app used as a hands-on reference for **containerizing a mul
 - [Folder Structure](#-folder-structure)
 - [API Reference](#-api-reference)
 - [Getting Started](#-getting-started)
-  - [Option A — Docker Compose (local dev)](#option-a--docker-compose-local-dev)
-  - [Option B — Kubernetes with kind](#option-b--kubernetes-with-kind)
+  * [Option A — Docker Compose (local dev)](#option-a--docker-compose-local-dev)
+  * [Option B — Kubernetes with kind](#option-b--kubernetes-with-kind)
 - [Environment Variables](#-environment-variables)
 - [Useful Commands](#-useful-commands)
 - [Known Issues](#-known-issues--things-worth-fixing)
@@ -49,43 +40,53 @@ The app is a minimal task manager: add a task, view the list, delete a task. Tha
 
 ## 🧰 Tech Stack
 
-| Layer | Technology |
-|---|---|
-| Frontend | React 19 + Vite, Axios |
-| Web server (frontend) | Nginx (reverse proxy to backend) |
-| Backend | FastAPI + SQLAlchemy + PyMySQL, Uvicorn |
-| Database | MySQL 8 |
-| Containerization | Docker (multi-stage build for frontend) |
-| Local orchestration | Docker Compose |
-| Cluster orchestration | Kubernetes (tested with `kind`) |
-| Config / secrets | ConfigMap + Secret |
-| Persistence | PersistentVolume + PersistentVolumeClaim (hostPath) |
+| Layer                 | Technology                                          |
+| --------------------- | --------------------------------------------------- |
+| Frontend              | React 19 + Vite, Axios                              |
+| Web server (frontend) | Nginx (reverse proxy to backend)                    |
+| Backend               | FastAPI + SQLAlchemy + PyMySQL, Uvicorn             |
+| Database              | MySQL 8                                             |
+| Containerization      | Docker (multi-stage build for frontend)             |
+| Local orchestration   | Docker Compose                                      |
+| Cluster orchestration | Kubernetes (tested with `kind`)                     |
+| Config / secrets      | ConfigMap + Secret                                  |
+| Persistence           | PersistentVolume + PersistentVolumeClaim (hostPath) |
 
 ---
 
 ## 🏗 Architecture
 
+Only the frontend is reachable from outside the cluster — backend and MySQL stay `ClusterIP`-only, so the frontend can't be bypassed to hit the database directly.
+
 ```mermaid
-graph TD
-    U["🧑 Browser"] -->|"http://localhost:&lt;hostPort&gt;"| FESVC["Frontend Service<br/>NodePort :30080"]
+flowchart TD
+    U["🧑 Browser"] -->|"http://localhost:hostPort"| FESVC["Frontend Service<br/>NodePort :30080"]
     FESVC --> FEPOD["React + Nginx Pod<br/>serves static build"]
     FEPOD -->|"/api/* proxy_pass"| BESVC["Backend Service<br/>ClusterIP :8000"]
     BESVC --> BEPOD["FastAPI Pod<br/>/api/v1/items"]
     BEPOD -->|"SQLAlchemy / PyMySQL"| DBSVC["MySQL Service<br/>ClusterIP :3306"]
     DBSVC --> DBPOD["MySQL Pod"]
     DBPOD --> PVC["PVC: mysql-pvc (1Gi)"]
-    PVC --> PV["PV: mysql-pv<br/>hostPath"]
+    PVC --> PV["PV: mysql-pv (hostPath)"]
 
     CM["ConfigMap: backend-config<br/>DB_HOST, DB_PORT"] -.-> BEPOD
     SEC["Secret: mysql-secret<br/>root password, db name"] -.-> BEPOD
     SEC -.-> DBPOD
 
-    style FEPOD fill:#149eca,color:#fff
-    style BEPOD fill:#009688,color:#fff
-    style DBPOD fill:#4479A1,color:#fff
+    classDef fe fill:#0b3a4a,stroke:#61dafb,stroke-width:2px,color:#fff
+    classDef be fill:#0b3d38,stroke:#009688,stroke-width:2px,color:#fff
+    classDef db fill:#10263a,stroke:#4479a1,stroke-width:2px,color:#fff
+    classDef cfg fill:#2e2408,stroke:#b58900,stroke-width:2px,color:#fff
+    classDef ext fill:#1c1c1c,stroke:#888,stroke-width:2px,color:#fff
+
+    class FESVC,FEPOD fe
+    class BESVC,BEPOD be
+    class DBSVC,DBPOD,PVC,PV db
+    class CM,SEC cfg
+    class U ext
 ```
 
-All three tiers run inside the `task-manager` namespace. Frontend is the only component exposed outside the cluster (NodePort); backend and MySQL are `ClusterIP`-only — the frontend can't be bypassed to hit the database directly, which is the right call.
+All three tiers run inside the `task-manager` namespace.
 
 ---
 
@@ -115,7 +116,7 @@ Delete follows the same path: `DELETE /api/v1/items/{id}` → 404 if the task do
 
 ## 📁 Folder Structure
 
-```text
+```
 .
 ├── K8s/
 │   ├── namespace.yml
@@ -173,12 +174,12 @@ Delete follows the same path: `DELETE /api/v1/items/{id}` → 404 if the task do
 
 Base path: `/api/v1`
 
-| Method | Endpoint | Body | Description |
-|---|---|---|---|
-| GET | `/health` | — | Liveness/readiness check, returns `{"status": "healthy"}` |
-| GET | `/api/v1/items` | — | List all tasks |
-| POST | `/api/v1/items` | `{ "title": string }` | Create a task |
-| DELETE | `/api/v1/items/{id}` | — | Delete a task by id, `404` if missing |
+| Method | Endpoint             | Body                  | Description                                               |
+| ------ | -------------------- | ---------------------- | --------------------------------------------------------- |
+| GET    | `/health`            | —                      | Liveness/readiness check, returns `{"status": "healthy"}` |
+| GET    | `/api/v1/items`      | —                      | List all tasks                                            |
+| POST   | `/api/v1/items`      | `{ "title": string }` | Create a task                                             |
+| DELETE | `/api/v1/items/{id}` | —                      | Delete a task by id, `404` if missing                     |
 
 There's no update/edit endpoint currently — tasks are create-or-delete only.
 
@@ -197,7 +198,7 @@ There's no update/edit endpoint currently — tasks are create-or-delete only.
 
 The compose file expects two env files that are **gitignored on purpose** (they hold DB credentials) — create them yourself first, using exact `KEY=VALUE` syntax (not `KEY: VALUE` — that's YAML syntax, and Compose's env file parser silently fails to pick it up):
 
-```bash
+```
 # backend/.env.backend
 DB_HOST=mysql
 DB_PORT=3306
@@ -206,7 +207,7 @@ DB_PASSWORD=choose-a-password
 DB_NAME=task_manager
 ```
 
-```bash
+```
 # .env.db  (repo root)
 MYSQL_ROOT_PASSWORD=choose-a-password   # must match DB_PASSWORD above, character-for-character
 MYSQL_DATABASE=task_manager
@@ -214,7 +215,7 @@ MYSQL_DATABASE=task_manager
 
 `docker-compose.yml`'s `mysql` service also needs a healthcheck so the backend actually waits for MySQL to accept connections instead of racing it on first boot:
 
-```yaml
+```
 mysql:
   image: mysql:8
   container_name: task-manager-mysql
@@ -248,7 +249,7 @@ backend:
 
 Then:
 
-```bash
+```
 git clone https://github.com/ArshadKhan-007/Three-Tier-Kubernetes-App.git
 cd Three-Tier-Kubernetes-App
 docker compose down -v          # if re-running: wipe any stale mysql volume first —
@@ -257,8 +258,8 @@ docker compose down -v          # if re-running: wipe any stale mysql volume fir
 docker compose up --build
 ```
 
-- Frontend → http://localhost:3000
-- Backend → http://localhost:8000/docs (Swagger UI)
+- Frontend → <http://localhost:3000>
+- Backend → <http://localhost:8000/docs> (Swagger UI)
 - Sanity check: `curl http://localhost:8000/health` → `{"status":"healthy"}`
 
 ### Option B — Kubernetes with kind
@@ -279,14 +280,14 @@ nodes:
 
 > `containerPort` and `hostPort` are not the same thing. `containerPort` has to stay `30080` because that's the `nodePort` hardcoded in `K8s/frontend/service.yml` — that's the fixed end of the chain. `hostPort` is just where *you* want it reachable on your machine; set it to `3001`, `8080`, whatever's free. If your `kind-config.yml` has `hostPort: 3001`, then the app is at `http://localhost:3001`, not `:30080` — the example below uses `30080` for both since that's the default, but swap in your actual `hostPort` value.
 
-```bash
+```
 kind create cluster --name three-tier --config kind-config.yml
 kubectl cluster-info
 ```
 
 Deploy in order (mysql before backend, backend before frontend — nothing here waits on readiness across resources):
 
-```bash
+```
 kubectl apply -f K8s/namespace.yml
 kubectl apply -f K8s/mysql/
 kubectl apply -f K8s/backend/
@@ -295,7 +296,7 @@ kubectl apply -f K8s/frontend/
 
 Watch it come up:
 
-```bash
+```
 kubectl get pods -n task-manager -w
 ```
 
@@ -303,7 +304,7 @@ Once everything is `Running`, open **http://localhost:\<your hostPort\>** — `h
 
 Didn't set up the port mapping, or on a cluster where NodePort isn't reachable? Fall back to port-forwarding:
 
-```bash
+```
 kubectl port-forward svc/frontend-service 3000:80 -n task-manager
 # → http://localhost:3000
 ```
@@ -314,13 +315,13 @@ kubectl port-forward svc/frontend-service 3000:80 -n task-manager
 
 ### Backend (`backend/app/core/database.py`)
 
-| Variable | Default | Used for |
-|---|---|---|
-| `DB_HOST` | `localhost` | MySQL host |
-| `DB_PORT` | `3306` | MySQL port |
-| `DB_USER` | `xyz` | MySQL user |
-| `DB_PASSWORD` | `RtabcPass` | MySQL password |
-| `DB_NAME` | `task_manager` | MySQL database name |
+| Variable      | Default        | Used for            |
+| ------------- | -------------- | -------------------- |
+| `DB_HOST`     | `localhost`    | MySQL host           |
+| `DB_PORT`     | `3306`         | MySQL port           |
+| `DB_USER`     | `xyz`          | MySQL user           |
+| `DB_PASSWORD` | `RtabcPass`    | MySQL password        |
+| `DB_NAME`     | `task_manager` | MySQL database name  |
 
 In Kubernetes, `DB_HOST`/`DB_PORT` come from the `backend-config` ConfigMap, and `DB_PASSWORD`/`DB_NAME` come from the `mysql-secret` Secret. `DB_USER` is hardcoded to `root` directly in `K8s/backend/deployment.yml`.
 
@@ -328,7 +329,7 @@ In Kubernetes, `DB_HOST`/`DB_PORT` come from the `backend-config` ConfigMap, and
 
 ## 🛠 Useful Commands
 
-```bash
+```
 # Pods / services / deployments
 kubectl get pods -n task-manager
 kubectl get svc -n task-manager
