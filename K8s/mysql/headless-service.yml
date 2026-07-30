@@ -4,11 +4,13 @@ metadata:
   name: mysql-service
   namespace: task-manager
 spec:
+  clusterIP: None
+
   selector:
     app: mysql
   ports:
     - protocol: TCP
       port: 3306
       targetPort: 3306
-  type: ClusterIP
+
   
