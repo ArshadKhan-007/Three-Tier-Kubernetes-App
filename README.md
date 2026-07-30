@@ -4,7 +4,7 @@
 
 ![React](https://img.shields.io/badge/Frontend-React_19_+_Vite-149eca?logo=react&logoColor=white) [![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi&logoColor=white)](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi&logoColor=white) [![MySQL](https://img.shields.io/badge/Database-MySQL_8-4479A1?logo=mysql&logoColor=white)](https://img.shields.io/badge/Database-MySQL_8-4479A1?logo=mysql&logoColor=white) [![Docker](https://img.shields.io/badge/Containerized-Docker-2496ED?logo=docker&logoColor=white)](https://img.shields.io/badge/Containerized-Docker-2496ED?logo=docker&logoColor=white) [![Kubernetes](https://img.shields.io/badge/Orchestration-Kubernetes-326CE5?logo=kubernetes&logoColor=white)](https://img.shields.io/badge/Orchestration-Kubernetes-326CE5?logo=kubernetes&logoColor=white) [![Nginx](https://img.shields.io/badge/Web_Server-Nginx-009639?logo=nginx&logoColor=white)](https://img.shields.io/badge/Web_Server-Nginx-009639?logo=nginx&logoColor=white)
 
-A small Task Manager app used as a hands-on reference for **containerizing a multi-tier app and deploying it to Kubernetes** — Deployments, Services, ConfigMaps, Secrets, and PV/PVC, all wired together.
+A small Task Manager app used as a hands-on reference for **containerizing a multi-tier app and deploying it to Kubernetes** — Deployments, StatefulSets, Services, ConfigMaps, Secrets, and per-pod persistent storage, all wired together.
 
 ---
 
@@ -22,7 +22,6 @@ A small Task Manager app used as a hands-on reference for **containerizing a mul
 - [Environment Variables](#-environment-variables)
 - [Useful Commands](#-useful-commands)
 - [Known Issues](#-known-issues--things-worth-fixing)
-- [Roadmap](#-roadmap)
 - [License](#-license)
 
 ---
@@ -33,8 +32,8 @@ The app is a minimal task manager: add a task, view the list, delete a task. Tha
 
 - **Frontend** — React (Vite) SPA, built into static files and served by Nginx. Nginx also reverse-proxies `/api/*` to the backend so the browser only ever talks to one origin.
 - **Backend** — FastAPI, layered into `api / core / models / schemas`, talking to MySQL via SQLAlchemy + PyMySQL.
-- **Database** — MySQL 8, with schema created automatically on backend startup (`Base.metadata.create_all`).
-- **Runtime** — every tier has its own Dockerfile. `docker-compose.yml` runs all three locally; the `K8s/` manifests run the same three tiers as a real cluster workload (Deployments + Services + ConfigMap + Secret + PV/PVC).
+- **Database** — MySQL 8, with schema created automatically on backend startup (`Base.metadata.create_all`). Runs as a **StatefulSet** with a headless Service, since a database is stateful workload and needs stable identity + per-pod storage — not a stateless `Deployment`.
+- **Runtime** — every tier has its own Dockerfile. `docker-compose.yml` runs all three locally; the `K8s/` manifests run the same three tiers as a real cluster workload (frontend/backend Deployments + Services, MySQL StatefulSet + headless Service, ConfigMap, Secret, and dynamically-provisioned per-pod storage via `volumeClaimTemplates`).
 
 ---
 
@@ -50,7 +49,7 @@ The app is a minimal task manager: add a task, view the list, delete a task. Tha
 | Local orchestration   | Docker Compose                                      |
 | Cluster orchestration | Kubernetes (tested with `kind`)                     |
 | Config / secrets      | ConfigMap + Secret                                  |
-| Persistence           | PersistentVolume + PersistentVolumeClaim (hostPath) |
+| Persistence           | StatefulSet `volumeClaimTemplates` bound to a static hostPath PV (kind-only) |
 
 ---
 
@@ -58,16 +57,18 @@ The app is a minimal task manager: add a task, view the list, delete a task. Tha
 
 Only the frontend is reachable from outside the cluster — backend and MySQL stay `ClusterIP`-only, so the frontend can't be bypassed to hit the database directly.
 
+MySQL runs as a **StatefulSet** (not a Deployment) behind a **headless Service** (`clusterIP: None`), giving it a stable pod identity (`mysql-0`) and a dedicated, per-pod PVC created automatically from `volumeClaimTemplates`. That PVC statically binds to `mysql-pv` (a hostPath PV, `storageClassName: ""` on both sides so `kind`'s default `local-path` provisioner doesn't intercept it) — kept intentional so data lands at a known path on the host for a `kind` cluster; a production cluster would drop the static PV and let a cloud CSI driver provision dynamically instead.
+
 ```mermaid
 flowchart TD
     U["🧑 Browser"] -->|"http://localhost:hostPort"| FESVC["Frontend Service<br/>NodePort :30080"]
     FESVC --> FEPOD["React + Nginx Pod<br/>serves static build"]
     FEPOD -->|"/api/* proxy_pass"| BESVC["Backend Service<br/>ClusterIP :8000"]
     BESVC --> BEPOD["FastAPI Pod<br/>/api/v1/items"]
-    BEPOD -->|"SQLAlchemy / PyMySQL"| DBSVC["MySQL Service<br/>ClusterIP :3306"]
-    DBSVC --> DBPOD["MySQL Pod"]
-    DBPOD --> PVC["PVC: mysql-pvc (1Gi)"]
-    PVC --> PV["PV: mysql-pv (hostPath)"]
+    BEPOD -->|"SQLAlchemy / PyMySQL"| DBSVC["mysql-service<br/>Headless (ClusterIP: None) :3306"]
+    DBSVC --> DBPOD["mysql-0 (StatefulSet pod)"]
+    DBPOD --> PVC["PVC: mysql-storage-mysql-0<br/>(auto-created, 1Gi)"]
+    PVC --> PV["PV: mysql-pv<br/>static hostPath (storageClassName: '')"]
 
     CM["ConfigMap: backend-config<br/>DB_HOST, DB_PORT"] -.-> BEPOD
     SEC["Secret: mysql-secret<br/>root password, db name"] -.-> BEPOD
@@ -128,11 +129,10 @@ Delete follows the same path: `DELETE /api/v1/items/{id}` → 404 if the task do
 │   │   ├── deployment.yml
 │   │   └── service.yml
 │   └── mysql/
-│       ├── deployment.yml
-│       ├── service.yml
+│       ├── statefulset.yml          # StatefulSet (was deployment.yml)
+│       ├── service.yml              # headless Service, clusterIP: None
 │       ├── secret.yml
-│       ├── pv.yml
-│       └── pvc.yml
+│       └── pv.yml                   # static hostPath PV — kind-only, see note below
 │
 ├── backend/
 │   ├── Dockerfile
@@ -167,6 +167,8 @@ Delete follows the same path: `DELETE /api/v1/items/{id}` → 404 if the task do
 ```
 
 > ⚠️ Note the real casing: it's `K8s/`, not `k8s/`, and the manifests are `.yml`, not `.yaml`. Every `kubectl apply -f k8s/...` command floating around in older docs for this repo will fail on a case-sensitive filesystem — the commands below use the actual paths.
+>
+> `K8s/mysql/pvc.yml` is gone — storage is now provisioned per-pod by the StatefulSet's `volumeClaimTemplates`, not a manually-written PVC. `pv.yml` is kept as a **static hostPath PV bound directly to `volumeClaimTemplates`** (`storageClassName: ""` on both sides) — this is a `kind`-specific choice for full control over where data lands on the host. On a real cluster (e.g. EKS with the EBS CSI driver), `pv.yml` would be deleted entirely and `volumeClaimTemplates` would reference the cloud provider's StorageClass for dynamic provisioning instead — writing a static PV by hand isn't the pattern there.
 
 ---
 
@@ -294,7 +296,7 @@ kubectl apply -f K8s/backend/
 kubectl apply -f K8s/frontend/
 ```
 
-Watch it come up:
+Watch it come up (MySQL pod will come up as `mysql-0`, not a random hash suffix — that's the StatefulSet giving it a stable name):
 
 ```
 kubectl get pods -n task-manager -w
@@ -330,17 +332,23 @@ In Kubernetes, `DB_HOST`/`DB_PORT` come from the `backend-config` ConfigMap, and
 ## 🛠 Useful Commands
 
 ```
-# Pods / services / deployments
+# Pods / services / deployments / statefulsets
 kubectl get pods -n task-manager
 kubectl get svc -n task-manager
 kubectl get deployments -n task-manager
+kubectl get statefulsets -n task-manager
+kubectl get pvc -n task-manager
 
 # Logs
 kubectl logs -f deployment/backend -n task-manager
 kubectl logs -f deployment/frontend -n task-manager
+kubectl logs -f statefulset/mysql -n task-manager
+# or, since it's a named pod:
+kubectl logs -f mysql-0 -n task-manager
 
 # Shell into a pod
 kubectl exec -it deployment/backend -n task-manager -- /bin/bash
+kubectl exec -it mysql-0 -n task-manager -- mysql -u root -p
 
 # Tear down
 kubectl delete -f K8s/frontend/
@@ -363,29 +371,18 @@ Called out plainly, since this repo is being used to demonstrate DevOps chops an
 3. **Stale Docker volume masked the two issues above.** `mysql_data` had already been initialized by an earlier run, so new env files had zero effect until the volume was wiped with `docker compose down -v`. Worth remembering any time a "fix" to an env file doesn't seem to change behavior — check for a stale volume before assuming the fix is wrong.
 4. **`frontend/nginx.conf` had a stray shell command pasted into it** — `location /api/ {kubectl logs $(kubectl get pod ...)` — which made Nginx refuse to start (`unknown directive "kubectl"`). Fixed by removing the pasted text.
 5. **No readiness gate between MySQL and the backend in Compose.** `depends_on: mysql` only waits for the container to *start*, not for MySQL to actually accept connections, so the backend hit `Connection refused` on first boot. Fixed by adding a `healthcheck` to the `mysql` service and `depends_on.mysql.condition: service_healthy` on the backend.
+6. **MySQL ran as a `Deployment` with a static, manually-authored PV/PVC pair.** A database is stateful — the right primitive is a `StatefulSet` with stable pod identity (`mysql-0`) and per-pod storage. Converted to a `StatefulSet` behind a headless Service (`clusterIP: None`); replaced the hand-written `pvc.yml` with `volumeClaimTemplates` so the PVC is generated per-pod automatically, while keeping the static hostPath `pv.yml` (`storageClassName: ""`) since this only runs on `kind` — a production cluster with a cloud CSI driver would drop the static PV and rely on dynamic provisioning instead.
 
 ### 🚧 Open
 
-6. **`frontend/nginx.conf` currently hardcodes `backend-service`** (the Kubernetes Service name), which means **it does not resolve under Docker Compose** (Compose uses the service key `backend` instead). This is a real environment-coupling problem: the same image can't currently serve both deployment targets. Proper fix is an Nginx config *template* (`default.conf.template`) with `proxy_pass http://${BACKEND_HOST}:8000;`, using the image's built-in `envsubst` entrypoint hook, and passing `BACKEND_HOST=backend` in Compose vs. `BACKEND_HOST=backend-service` in the K8s Deployment.
-7. **`K8s/mysql/secret.yml` has a hardcoded, committed credential.** Base64 is encoding, not encryption — `MYSQL_ROOT_PASSWORD` decodes straight to `rootpassword`. Committing real (or real-looking) secrets to git is one of the first things reviewers flag. Move it to a value injected at deploy time (`kubectl create secret` imperatively, Sealed Secrets, SOPS, or an external secrets manager), and rotate it since it's now public in this repo's history.
-8. **Backend connects to MySQL as `root`.** Works, but it's not least-privilege. A dedicated `task_manager_app` user scoped to just that database is the correct setup for anything beyond a demo.
-9. **`frontend/src/app.jsx` is an empty duplicate of `App.jsx`.** Harmless on Linux, but a landmine on case-insensitive filesystems (macOS/Windows) where git can end up tracking two entries for what the OS sees as one file. Delete it.
-10. **No readiness gate between tiers in Kubernetes either** — same class of race as issue #5, just not yet fixed on the K8s side. The backend's `readinessProbe` checks its own `/health`, not whether MySQL is reachable.
-11. **No update endpoint.** Tasks can be created and deleted but not edited — fine for a demo, worth mentioning if the API is presented as complete.
+7. **`frontend/nginx.conf` currently hardcodes `backend-service`** (the Kubernetes Service name), which means **it does not resolve under Docker Compose** (Compose uses the service key `backend` instead). This is a real environment-coupling problem: the same image can't currently serve both deployment targets. Proper fix is an Nginx config *template* (`default.conf.template`) with `proxy_pass http://${BACKEND_HOST}:8000;`, using the image's built-in `envsubst` entrypoint hook, and passing `BACKEND_HOST=backend` in Compose vs. `BACKEND_HOST=backend-service` in the K8s Deployment.
+8. **`K8s/mysql/secret.yml` has a hardcoded, committed credential.** Base64 is encoding, not encryption — `MYSQL_ROOT_PASSWORD` decodes straight to a plaintext password. Committing real (or real-looking) secrets to git is one of the first things reviewers flag. Move it to a value injected at deploy time (`kubectl create secret` imperatively, Sealed Secrets, SOPS, or an external secrets manager), and rotate it since it's now public in this repo's history.
+9. **Backend connects to MySQL as `root`.** Works, but it's not least-privilege. A dedicated `task_manager_app` user scoped to just that database is the correct setup for anything beyond a demo.
+10. **`frontend/src/app.jsx` is an empty duplicate of `App.jsx`.** Harmless on Linux, but a landmine on case-insensitive filesystems (macOS/Windows) where git can end up tracking two entries for what the OS sees as one file. Delete it.
+11. **No readiness gate between tiers in Kubernetes either** — same class of race as issue #5, just not yet fixed on the K8s side. The backend's `readinessProbe` checks its own `/health`, not whether MySQL is reachable.
+12. **No update endpoint.** Tasks can be created and deleted but not edited — fine for a demo, worth mentioning if the API is presented as complete.
 
----
 
-## 🗺 Roadmap
-
-- [ ] Ingress controller instead of raw NodePort
-- [ ] Horizontal Pod Autoscaler
-- [ ] Helm chart (replace the raw manifests)
-- [ ] CI/CD (build, scan, push, deploy)
-- [ ] Externalized secrets management
-- [ ] Prometheus + Grafana monitoring
-- [ ] TLS termination
-
----
 
 ## 📄 License
 
