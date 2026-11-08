@@ -1,0 +1,102 @@
+name: Cohort 4 - Three-Tier Docker CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cohort4-production
+  cancel-in-progress: false
+
+env:
+  DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+  FRONTEND_IMAGE: ${{ vars.DOCKERHUB_USERNAME }}/cohort4-frontend
+  BACKEND_IMAGE: ${{ vars.DOCKERHUB_USERNAME }}/cohort4-backend
+
+jobs:
+  build-scan-push:
+    name: Build, Scan and Push Images
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout repository
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # 2. Configure Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 3. Validate Docker Hub configuration
+      - name: Validate Docker Hub username
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ]; then
+            echo "::error::DOCKERHUB_USERNAME is not configured"
+            exit 1
+          fi
+
+          echo "Docker Hub username configured"
+
+      # 4. Build frontend image
+      - name: Build frontend Docker image
+        run: |
+          docker build \
+            -t task-manager-frontend:scan \
+            ./frontend
+
+      # 5. Build backend image
+      - name: Build backend Docker image
+        run: |
+          docker build \
+            -t task-manager-backend:scan \
+            ./backend
+
+      # 6. Scan frontend image
+      - name: Scan frontend with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: task-manager-frontend:scan
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+
+      # 7. Scan backend image
+      - name: Scan backend with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: task-manager-backend:scan
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+
+      # 8. Authenticate to Docker Hub
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 9. Tag and push frontend
+      - name: Tag and push frontend image
+        run: |
+          docker tag task-manager-frontend:scan \
+            "${FRONTEND_IMAGE}:${GITHUB_SHA}"
+
+          docker push "${FRONTEND_IMAGE}:${GITHUB_SHA}"
+
+      # 10. Tag and push backend
+      - name: Tag and push backend image
+        run: |
+          docker tag task-manager-backend:scan \
+            "${BACKEND_IMAGE}:${GITHUB_SHA}"
+
+          docker push "${BACKEND_IMAGE}:${GITHUB_SHA}"
