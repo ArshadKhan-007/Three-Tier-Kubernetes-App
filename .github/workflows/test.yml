@@ -77,13 +77,13 @@ jobs:
       - name: Tag and push frontend
         run: |
           docker tag task-manager-frontend:scan \
-            "$FRONTEND_IMAGE:${GITHUB_SHA}"
+            "${DOCKERHUB_USERNAME}/cohort4-frontend:${GITHUB_SHA}"
 
-          docker push "$FRONTEND_IMAGE:${GITHUB_SHA}"
+          docker push "${DOCKERHUB_USERNAME}/cohort4-frontend:${GITHUB_SHA}"
 
       - name: Tag and push backend
         run: |
           docker tag task-manager-backend:scan \
-            "$BACKEND_IMAGE:${GITHUB_SHA}"
+            "${DOCKERHUB_USERNAME}/cohort4-backend:${GITHUB_SHA}"
 
-          docker push "$BACKEND_IMAGE:${GITHUB_SHA}"
+          docker push "${DOCKERHUB_USERNAME}/cohort4-backend:${GITHUB_SHA}"
