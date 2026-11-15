@@ -21,7 +21,7 @@ A small Task Manager app used as a hands-on reference for **containerizing a mul
   * [Option B — Kubernetes with kind](#option-b--kubernetes-with-kind)
 - [Environment Variables](#-environment-variables)
 - [Useful Commands](#-useful-commands)
-- [Known Issues](#-known-issues--things-worth-fixing)
+- [Monitoring & Observability](#-monitoring--observability)
 - [License](#-license)
 
 ---
@@ -162,6 +162,7 @@ Delete follows the same path: `DELETE /api/v1/items/{id}` → 404 if the task do
 │       ├── services/                # apiClient.js, taskService.js
 │       └── constants/api.js
 │
+├── monitoring-assests/              # README screenshots
 ├── docker-compose.yml
 └── README.md
 ```
@@ -196,8 +197,6 @@ There's no update/edit endpoint currently — tasks are create-or-delete only.
 
 ### Option A — Docker Compose (local dev)
 
-> ⚠️ **Current limitation:** `frontend/nginx.conf` proxies to `http://backend-service:8000` — a hostname that only resolves inside Kubernetes (it's the K8s `Service` name). Compose's internal DNS resolves by **compose service key** instead (`backend`, not `backend-service`), so **as currently configured, the frontend container fails to start under Compose** (`nginx: [emerg] host not found in upstream "backend-service"`). This was a deliberate tradeoff made while focusing on the Kubernetes deployment path — see [Known Issues](#-known-issues--things-worth-fixing) for the proper long-term fix. To run Compose locally right now, temporarily change that line to `proxy_pass http://backend:8000;` and rebuild.
-
 The compose file expects two env files that are **gitignored on purpose** (they hold DB credentials) — create them yourself first, using exact `KEY=VALUE` syntax (not `KEY: VALUE` — that's YAML syntax, and Compose's env file parser silently fails to pick it up):
 
 ```
@@ -215,38 +214,56 @@ MYSQL_ROOT_PASSWORD=choose-a-password   # must match DB_PASSWORD above, characte
 MYSQL_DATABASE=task_manager
 ```
 
-`docker-compose.yml`'s `mysql` service also needs a healthcheck so the backend actually waits for MySQL to accept connections instead of racing it on first boot:
+The full `docker-compose.yml` runs all three tiers. Note the `healthcheck` on `mysql` plus `condition: service_healthy` on `backend`, so the backend waits for MySQL to actually accept connections instead of racing it on first boot, and the `BACKEND_HOST` / `BACKEND_PORT` variables that tell Nginx in the frontend where to proxy `/api`:
 
-```
-mysql:
-  image: mysql:8
-  container_name: task-manager-mysql
-  ports:
-    - "3306:3306"
-  env_file:
-    - .env.db
-  volumes:
-    - mysql_data:/var/lib/mysql
-  healthcheck:
-    test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-    interval: 5s
-    timeout: 5s
-    retries: 10
-    start_period: 10s
-  restart: unless-stopped
+```yaml
+services:
 
-backend:
-  build:
-    context: ./backend
-  container_name: task-manager-backend
-  ports:
-    - "8000:8000"
-  env_file:
-    - ./backend/.env.backend
-  depends_on:
-    mysql:
-      condition: service_healthy   # waits for the healthcheck above, not just "container started"
-  restart: unless-stopped
+  frontend:
+    build:
+      context: ./frontend
+    container_name: task-manager-frontend
+    environment:
+      - BACKEND_HOST=backend
+      - BACKEND_PORT=8000
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    container_name: task-manager-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env.backend
+    depends_on:
+      mysql:
+        condition: service_healthy   # waits for the healthcheck below, not just "container started"
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8
+    container_name: task-manager-mysql
+    ports:
+      - "3306:3306"
+    env_file:
+      - .env.db
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
 ```
 
 Then:
@@ -360,29 +377,143 @@ kind delete cluster --name three-tier
 
 ---
 
-## ⚠️ Known Issues / Things Worth Fixing
+## 📊 Monitoring & Observability
 
-Called out plainly, since this repo is being used to demonstrate DevOps chops and an interviewer will spot these in about thirty seconds. Split by status so it's clear what's actually been dealt with vs. what's still sitting there.
+The app is observed with the standard open-source stack, installed **entirely with Helm** into a dedicated `monitoring` namespace (no hand-written manifests):
 
-### ✅ Resolved (found and fixed during local debugging)
+| Concern | Tool | Helm chart |
+| ------- | ---- | ---------- |
+| Metrics | Prometheus, node-exporter, kube-state-metrics | `prometheus-community/kube-prometheus-stack` |
+| Dashboards | Grafana | `kube-prometheus-stack` |
+| Logs | Loki + Promtail | `grafana/loki-stack` |
+| Alerting | Grafana alert rule → Discord contact point | `kube-prometheus-stack` (Grafana) |
 
-1. **`.env.db` used YAML syntax (`KEY: VALUE`) instead of env-file syntax (`KEY=VALUE`).** Compose's env-file parser doesn't error on this — it just silently doesn't set the variable. Fixed by switching to `=`.
-2. **Root password mismatch between `.env.db` and `backend/.env.backend`.** MySQL sets its real root password from `MYSQL_ROOT_PASSWORD` only on first init; the backend has to match it exactly or every query fails with `1045 Access denied`. Fixed by aligning both values.
-3. **Stale Docker volume masked the two issues above.** `mysql_data` had already been initialized by an earlier run, so new env files had zero effect until the volume was wiped with `docker compose down -v`. Worth remembering any time a "fix" to an env file doesn't seem to change behavior — check for a stale volume before assuming the fix is wrong.
-4. **`frontend/nginx.conf` had a stray shell command pasted into it** — `location /api/ {kubectl logs $(kubectl get pod ...)` — which made Nginx refuse to start (`unknown directive "kubectl"`). Fixed by removing the pasted text.
-5. **No readiness gate between MySQL and the backend in Compose.** `depends_on: mysql` only waits for the container to *start*, not for MySQL to actually accept connections, so the backend hit `Connection refused` on first boot. Fixed by adding a `healthcheck` to the `mysql` service and `depends_on.mysql.condition: service_healthy` on the backend.
-6. **MySQL ran as a `Deployment` with a static, manually-authored PV/PVC pair.** A database is stateful — the right primitive is a `StatefulSet` with stable pod identity (`mysql-0`) and per-pod storage. Converted to a `StatefulSet` behind a headless Service (`clusterIP: None`); replaced the hand-written `pvc.yml` with `volumeClaimTemplates` so the PVC is generated per-pod automatically, while keeping the static hostPath `pv.yml` (`storageClassName: ""`) since this only runs on `kind` — a production cluster with a cloud CSI driver would drop the static PV and rely on dynamic provisioning instead.
+```mermaid
+flowchart LR
+    subgraph TM["namespace: task-manager"]
+        FE["frontend"]
+        BE["backend"]
+        DB["mysql-0"]
+    end
 
-### 🚧 Open
+    KUBELET["kubelet / cAdvisor<br/>kube-state-metrics<br/>node-exporter"] -->|scrape| PROM["Prometheus"]
+    TM -.->|stdout logs| PT["Promtail<br/>(DaemonSet)"]
+    PT --> LOKI["Loki"]
 
-7. **`frontend/nginx.conf` currently hardcodes `backend-service`** (the Kubernetes Service name), which means **it does not resolve under Docker Compose** (Compose uses the service key `backend` instead). This is a real environment-coupling problem: the same image can't currently serve both deployment targets. Proper fix is an Nginx config *template* (`default.conf.template`) with `proxy_pass http://${BACKEND_HOST}:8000;`, using the image's built-in `envsubst` entrypoint hook, and passing `BACKEND_HOST=backend` in Compose vs. `BACKEND_HOST=backend-service` in the K8s Deployment.
-8. **`K8s/mysql/secret.yml` has a hardcoded, committed credential.** Base64 is encoding, not encryption — `MYSQL_ROOT_PASSWORD` decodes straight to a plaintext password. Committing real (or real-looking) secrets to git is one of the first things reviewers flag. Move it to a value injected at deploy time (`kubectl create secret` imperatively, Sealed Secrets, SOPS, or an external secrets manager), and rotate it since it's now public in this repo's history.
-9. **Backend connects to MySQL as `root`.** Works, but it's not least-privilege. A dedicated `task_manager_app` user scoped to just that database is the correct setup for anything beyond a demo.
-10. **`frontend/src/app.jsx` is an empty duplicate of `App.jsx`.** Harmless on Linux, but a landmine on case-insensitive filesystems (macOS/Windows) where git can end up tracking two entries for what the OS sees as one file. Delete it.
-11. **No readiness gate between tiers in Kubernetes either** — same class of race as issue #5, just not yet fixed on the K8s side. The backend's `readinessProbe` checks its own `/health`, not whether MySQL is reachable.
-12. **No update endpoint.** Tasks can be created and deleted but not edited — fine for a demo, worth mentioning if the API is presented as complete.
+    PROM --> GRAF["Grafana"]
+    LOKI --> GRAF
+    GRAF -->|"alert rule: backend replicas < 1"| DC["Discord"]
+```
 
+### Install
 
+```bash
+helm repo add grafana https://grafana.github.io/helm-charts
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+
+# Logs: Loki + Promtail
+helm install loki grafana/loki-stack -n monitoring --create-namespace \
+  --set loki.enabled=true \
+  --set promtail.enabled=true \
+  --set loki.persistence.enabled=true \
+  --set loki.persistence.size=5Gi \
+  --set loki.isDefault=false
+
+# Metrics + Grafana + Alertmanager
+helm install monitoring prometheus-community/kube-prometheus-stack -n monitoring \
+  --set kubeEtcd.enabled=false \
+  --set kubeScheduler.enabled=false \
+  --set kubeControllerManager.enabled=false \
+  --set kubeProxy.enabled=false \
+  --set grafana.adminPassword='<your-password>' \
+  --set 'grafana.additionalDataSources[0].name=Loki' \
+  --set 'grafana.additionalDataSources[0].type=loki' \
+  --set 'grafana.additionalDataSources[0].access=proxy' \
+  --set 'grafana.additionalDataSources[0].url=http://loki.monitoring.svc:3100'
+
+kubectl get pods -n monitoring
+```
+
+> The `kubeEtcd` / `kubeScheduler` / `kubeControllerManager` / `kubeProxy` flags are disabled because on `kind` those control-plane endpoints aren't scrapeable and would show up as permanently "down" targets.
+
+Open Grafana:
+
+```bash
+kubectl port-forward svc/monitoring-grafana 3001:80 -n monitoring
+# http://localhost:3001  (user: admin)
+```
+
+### Kubernetes metrics dashboard
+
+Imported the community dashboard **Kubernetes / Views / Pods** (Grafana.com ID `15760`) via **Dashboards → New → Import**. Filtered to the `task-manager` namespace, it shows CPU / memory usage against requests and limits for the `frontend`, `backend` and `mysql` containers.
+
+![Kubernetes pods dashboard](monitoring-assests/grafana-k8s-pods-dashboards.png)
+
+### Application logs with Loki
+
+Promtail runs on every node, ships container logs to Loki, and Grafana queries them with LogQL (**Explore → Loki**):
+
+```
+{namespace="task-manager", app="backend"}
+```
+
+![Backend logs in Loki](monitoring-assests/grafana-loki-backend.png)
+
+### Alerting
+
+A Grafana-managed alert rule, `backenddown`, watches the backend Deployment and notifies a **Discord** channel through a Grafana contact point.
+
+| Setting | Value |
+| ------- | ----- |
+| Query | `kube_deployment_status_replicas_available{namespace="task-manager",deployment="backend"}` |
+| Condition | `IS BELOW 1` |
+| Evaluation interval / pending period | 1m / 1m |
+| Contact point | `discord` (webhook) |
+
+Trigger it by taking the backend down:
+
+```bash
+kubectl scale deployment backend -n task-manager --replicas=0   # alert fires
+kubectl scale deployment backend -n task-manager --replicas=1   # alert resolves
+```
+
+**Alert firing in Grafana:**
+
+![Alert rule firing](monitoring-assests/grafana-alert-firing.png)
+
+**Discord notification (firing):**
+
+![Discord firing](monitoring-assests/discord-alert-firing.png)
+
+**Discord notification (resolved):**
+
+![Discord resolved](monitoring-assests/discord-alert-resolved.png)
+
+### Problems hit along the way
+
+| Problem | Cause | Fix |
+| ------- | ----- | --- |
+| Grafana pod in `CrashLoopBackOff` | `loki-stack` provisions its Loki datasource as default, and so does Prometheus. Grafana allows only one default per org. | `--set loki.isDefault=false` |
+| Alert never fired | Threshold was `IS ABOVE 1`. The healthy value is `1` and the failure value is `0`, so the condition could never be true. | Changed to `IS BELOW 1` |
+| Imported dashboards lost after a Grafana restart | Grafana has no persistent volume in this setup. | Re-import the dashboard (or enable `grafana.persistence`) |
+
+### Notes and next steps
+
+- Grafana-managed rules (used here) and Prometheus rules are separate systems. The ~100 built-in Prometheus alert rules route through **Alertmanager**, not through Grafana contact points.
+- Current metrics are infrastructure-level (CPU, memory, pod state). Application-level metrics (request rate, latency, 5xx) need a `/metrics` endpoint in FastAPI plus a `ServiceMonitor`.
+- Promtail is deprecated upstream; Grafana Alloy is its replacement.
+- Never commit the Grafana admin password or the Discord webhook URL.
+
+Tear down:
+
+```bash
+helm uninstall monitoring -n monitoring
+helm uninstall loki -n monitoring
+kubectl delete namespace monitoring
+```
+
+---
 
 ## 📄 License
 
