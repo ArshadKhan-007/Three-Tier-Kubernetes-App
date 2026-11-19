@@ -490,13 +490,6 @@ kubectl scale deployment backend -n task-manager --replicas=1   # alert resolves
 
 ![Discord resolved](monitoring-assests/discord-alert-resolved.png)
 
-### Problems hit along the way
-
-| Problem | Cause | Fix |
-| ------- | ----- | --- |
-| Grafana pod in `CrashLoopBackOff` | `loki-stack` provisions its Loki datasource as default, and so does Prometheus. Grafana allows only one default per org. | `--set loki.isDefault=false` |
-| Alert never fired | Threshold was `IS ABOVE 1`. The healthy value is `1` and the failure value is `0`, so the condition could never be true. | Changed to `IS BELOW 1` |
-| Imported dashboards lost after a Grafana restart | Grafana has no persistent volume in this setup. | Re-import the dashboard (or enable `grafana.persistence`) |
 
 ### Notes and next steps
 
